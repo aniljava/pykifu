@@ -1,0 +1,546 @@
+#!/usr/bin/env python2
+
+import sys
+import math
+import textwrap
+import codecs
+import mako.template
+import gomill.sgf
+import gomill.boards
+import codecs
+import collections
+
+def main():
+    
+    settings = {
+        'page_width': 612.00,      # US STANDARD LETTER WIDTH
+        'page_height': 792.00,     # US STANDARD LETTER WIDTH
+        'page_margin': 40.00,           # 0.55 inch margin
+        'font_family': 'Bodoni',
+        'font_size': 12,
+    }
+
+    settings['goban_width'] = settings['page_width'] - settings['page_margin'] * 2
+    settings['templates'] = load_templates(**settings)
+    sgf_file = sys.argv[1]
+    process_file(sgf_file, **settings)
+
+
+def process_file(path, **kws):
+    sgf_text = open(path).read()
+    process_sgf(sgf_text, **kws)
+
+def process_sgf(text, **settings):
+    game = gomill.sgf.Sgf_game.from_string(text)
+    board = gomill.boards.Board(19)
+    
+
+
+    root_node = game.get_root()
+    metadata = {}
+    properties = root_node.properties()
+    for p in properties:
+        metadata[p] = root_node.get(p)
+    settings['metadata'] = metadata
+
+
+
+    nodes = list(game.get_main_sequence())
+    splits = split_moves(game)
+
+
+    pages = []
+    
+    # print >>sys.stderr, splits
+    
+    for start, end in splits:
+        stones = ''
+        # 1. Show all moves so far without a label
+        for node in nodes[1:start]:
+            colour, pos = node.get_move()
+            if pos is None:
+                continue
+            row, col = pos
+            colour = board.get(row, col)
+            if colour:
+                stones += settings['templates']['stone'].render(x = col, y = row, stone_color = colour, stone_label = None, stone_symbol = None , **settings)
+                
+
+        # 2. Show current moves with a number
+        for i, node in enumerate(nodes[start:end+1]):
+            colour, pos = node.get_move()
+            if pos is None:
+                continue
+            row, col = pos
+            # print >>sys.stderr, 'COLOUR', row, col, colour
+            board.play(row, col, colour)
+
+            stones += settings['templates']['stone'].render(x = col, y = row, stone_color = colour, stone_label = '{}'.format(i + start), stone_symbol = None , **settings)
+            
+        
+        # 3. Apply Markers
+        for i, node in enumerate(nodes[start:end+1]):        
+            if 'LB' in node.properties():                
+                for moves in node.get('LB'):
+                    _pos, _color  = moves
+                    _y, _x = _pos
+                    
+                    label_stone_color = board.get(_y, _x)
+                    stones += settings['templates']['stone'].render(x = _x, y = _y , stone_color = label_stone_color ,  stone_label = '{}'.format(_color), stone_symbol = None,  **settings )
+            
+            if 'TR' in node.properties():                
+                for moves in node.get('TR'):
+                    _pos  = moves
+                    _y, _x = _pos
+                    label_stone_color = board.get(_y, _x)
+                    stones += settings['templates']['stone'].render(x = _x, y = _y , stone_color = label_stone_color ,  stone_label = None , stone_symbol = 's',  **settings )
+                
+
+        # 4. Write Notes
+        notes = []
+        for i, node in enumerate(nodes[start:end+1]):
+            if node.has_property('C'):
+                note = node.get('C')
+                notes.append(note)
+
+        notes = normalize_notes(notes)
+        if len(notes) >= 0:
+            goban = settings['templates']['goban_page'].render(notes=notes[:8], **settings)
+            goban += stones
+            pages.append(goban)
+        if len(notes) > 8 :
+            goban = settings['templates']['notes_page'].render(notes=notes[8:], **settings)
+            pages.append(goban)
+        
+
+
+    # Full numbered page
+    blank_stones = ''
+    stones = ''
+    played_moves = {}
+    numbered_board = gomill.boards.Board(19)
+    captures = collections.defaultdict(list)
+    for i, node in enumerate(nodes):
+        color, pos = node.get_move()
+        if pos is None:
+            continue
+        row, col = pos
+        if board.get(row, col) is not None:
+            blank_stones += settings['templates']['stone'].render(x = col, y = row, stone_color = color, stone_label = None, stone_symbol = None , **settings)
+    
+
+        if (row, col) in played_moves:
+            captures[played_moves[(row,col)]].append(i)
+        else:
+            stones += settings['templates']['stone'].render(x = col, y = row, stone_color = color, stone_label = '{}'.format(i ), stone_symbol = None , **settings)
+            played_moves[(row, col)] = i
+        
+
+    notes = []
+    
+    for move, others in captures.items():
+        notes.append('{} : {} '.format(move, ', '.join([str(s) for s in others])))
+    
+    goban = settings['templates']['goban_page'].render(notes= notes, **settings)
+    goban += stones
+
+    title_page = settings['templates']['title_page'].render(notes=None, **settings)
+    title_page += settings['templates']['goban_page'].render(notes= None, **settings)
+    title_page += blank_stones
+
+    title_pages = [title_page]
+
+    if root_node.has_property('C'):
+        notes = [root_node.get('C')]
+        notes = normalize_notes(notes)
+        if len(notes) == 1 and notes[0] == 'http://gogameguru.com/':
+            pass
+        else:
+            notes_page = settings['templates']['notes_page'].render(notes=notes , **settings)
+            title_pages.append(notes_page)
+
+    pages = title_pages + pages
+    pages.append(goban)
+    
+        
+
+
+
+
+
+    final = settings['templates']['document_head'].render(pages=pages, **settings)
+
+    
+    nodes = list(game.get_main_sequence())
+
+
+    
+    print final
+    # print 'showpage'
+
+
+def normalize_notes(notes):
+
+    notes = [n.replace('(', '\\(') for n in notes]
+    notes = [n.replace(')', '\\)') for n in notes]
+    
+    wrapped = []
+    w = textwrap.TextWrapper(width=87,break_long_words=False,replace_whitespace=False)
+    for n in notes:
+        n.replace('\n\n', '\n')
+        for line in n.split('\n'):
+            wrapped.extend(w.wrap(line))
+            wrapped.append('')
+
+    notes = '\n'.join(wrapped)
+    notes = notes.replace('\n\n\n', '\n\n')
+    notes = notes.strip()
+    notes = notes.split('\n')
+
+    notes = [n for n in notes if n.strip() != '']
+    return notes
+
+def split_moves(game, **kws):
+    moves = split_by_comments(game, **kws)
+    if len(moves) < 2:
+        moves = split_by_sente(game, **kws)
+
+    return moves
+
+
+def split_by_sente(game, **kws):
+
+    result = []
+    start = 1
+    nodes = list(game.get_main_sequence())
+    nodes = nodes[1:]
+
+    last_pos = None
+    
+
+    for i, node in enumerate(nodes):
+        move, pos = node.get_move()
+        if pos is None:
+            continue
+        
+        split = False
+        if i == 4:
+            split = True
+
+
+        if last_pos is not None and i > 4:
+            x2, y2 = last_pos
+            x1, y1 = pos
+
+            distance = (x2-x1)**2 + (y2-y1)**2
+            if distance > 24 or (x2-x1)**2 >= 25 or (y2-y1)**2 >= 25:
+                # print >>sys.stderr, i+1, distance, last_pos, pos
+                split = True
+        
+        if split is False and i - start > 10:
+            result.append((start , start + 5))
+            start = start + 5 + 1
+            nodes[start-1].set_raw('C', 'Move {}-{}'.format(start, start+5))
+            
+            
+        
+        last_pos = pos
+        if split:
+            result.append((start , i))
+            nodes[start-1].set_raw('C', 'Move {}-{}'.format(start, i))
+            start = i+1
+            last_pos = None
+            
+        
+
+    if start <= len(nodes):        
+        result.append((start, len(nodes)))
+
+    return result
+
+
+
+
+def split_by_comments(game, **kws):
+    result = []
+    start = 1
+    nodes = list(game.get_main_sequence())
+    nodes = nodes[1:]
+    for i, node in enumerate(nodes):
+        move, pos = node.get_move()
+        if pos is None:
+            continue
+        split = False
+
+        if node.has_property('C'):
+            split = True
+        
+        if split:           
+            result.append((start, i+1))
+            start = i+2
+
+    if start <= len(nodes):        
+        result.append((start, len(nodes)))
+    return result
+
+
+
+
+def load_templates(**kws):
+    templates = {
+        'goban_page' : mako.template.Template(GOBAN_PAGE, default_filters=['decode.utf8'], input_encoding='utf-8', output_encoding='utf-8'),
+        'notes_page' : mako.template.Template(NOTES_PAGE, default_filters=['decode.utf8'], input_encoding='utf-8', output_encoding='utf-8'),
+        'document_head' : mako.template.Template(DOCUMENT, default_filters=['decode.utf8'], input_encoding='utf-8', output_encoding='utf-8'),
+        'stone' : mako.template.Template(STONE, default_filters=['decode.utf8'], input_encoding='utf-8', output_encoding='utf-8'),
+        'title_page' : mako.template.Template(TITLE_PAGE, default_filters=['decode.utf8'], input_encoding='utf-8', output_encoding='utf-8'),
+    }
+    return templates
+
+
+
+
+## START --------------- TEMPLATES
+
+TITLE_PAGE = '''
+<%
+    line_height = font_size * 1.2
+    notes_x = page_margin + 2 * line_height 
+    notes_y = page_height - 2 * page_margin - goban_width - 1.55 * line_height
+%>
+1 setlinewidth
+newpath
+${notes_x} ${notes_y} ${font_size/1.2} 0 360 arc
+gsave
+    0 setgray
+    fill
+grestore
+stroke
+${notes_x + line_height} ${notes_y - 0.3 * line_height} moveto (${metadata.get('PB', ' ') + ' ' + metadata.get('BR', ' ') }) show
+
+
+newpath ${notes_x} ${notes_y - 2 * line_height} ${font_size/1.2} 0 360 arc stroke
+${notes_x + line_height} ${notes_y - 2.3 * line_height} moveto (${metadata.get('PW', ' ') + ' ' + metadata.get('WR', ' ') }) show
+
+
+0.1 setlinewidth
+newpath
+${page_margin} ${notes_y - 3.5 * line_height}  moveto
+${page_margin + goban_width} ${notes_y - 3.5 * line_height}  lineto
+stroke
+
+newpath
+${page_margin + goban_width / 2 } ${notes_y - 3.5 * line_height}  moveto
+${page_margin + goban_width / 2 } ${page_height - 2 * page_margin - goban_width}  lineto
+stroke
+
+<%
+        result = metadata.get('RE', ' ').upper()
+        result = result.replace('RESIGN', 'R')
+        result += '  ' + metadata.get('RU', ' ') + ' ({})'.format(metadata.get('KM', ' '))
+        result = result.upper()
+%>
+/${font_family} findfont
+${font_size * 1.8} scalefont
+setfont   
+${page_margin + goban_width / 2 + 5 } ${page_height - 2 * page_margin - goban_width - font_size * 3.6} moveto
+    (${result}) show
+
+    <%
+        
+        line_1 = ''
+        
+        if 'TM' in metadata:
+            line_1 = 'Time: {:.2f} M + {}'.format(metadata['TM'] / 60, metadata.get('OT'))
+        line_2 = ''
+        if 'DT' in metadata:
+            line_2 = '{} {}, {}'.format(metadata['DT'] , metadata.get('EV', ''), metadata.get('PC', ''))
+        
+
+        line_1 = line_1.upper()
+    %>
+     /Bodoni findfont
+    ${font_size * 1} scalefont
+    setfont  
+
+    ${notes_x } ${notes_y - 5 * line_height} moveto
+    (${line_1}) show
+
+    ${notes_x } ${notes_y - 6.3 * line_height} moveto    
+    (${line_2}) show
+
+
+'''
+
+
+
+GOBAN_PAGE = '''
+
+<%
+    goban_x = page_margin
+    goban_y = page_height - goban_width - page_margin
+    line_space = goban_width / 18.00
+    hoshi_size = line_space / 12.00
+%>
+
+0.1 setlinewidth
+0.00 setgray
+
+newpath ${goban_x}  ${goban_y} ${goban_width} ${goban_width} rectstroke
+
+%%LINES
+%for i in range(18):
+    %%VERTICALS
+    newpath
+    ${goban_x + i * line_space } ${goban_y} moveto
+    ${goban_x + i * line_space } ${goban_y + goban_width } lineto
+    stroke
+
+    newpath 
+    %%HORIZONTAL
+    ${goban_x} ${goban_y + i* line_space} moveto
+    ${goban_x + goban_width} ${goban_y + i* line_space} lineto
+    stroke
+%endfor
+
+%%MARK HOSHI
+%for i,j in [(3,3), (3,15), (3,9), (15,15), (9,15), (9,9), (9,3), (15,3), (15,9)]:
+
+    newpath ${goban_x + i * line_space} ${goban_y + j * line_space} ${hoshi_size} 0 360 arc 
+    gsave
+      fill 
+    grestore
+    stroke 
+%endfor
+
+%%TODO Allow alpha numbering
+
+%% NOTES RECTANGLE
+
+newpath ${page_margin} ${page_margin} ${goban_width} ${page_height - goban_width - 3 * page_margin} rectstroke
+
+<%
+    line_height = font_size * 1.2
+    notes_x = page_margin + line_height
+    notes_y = page_height - goban_width - 2 * page_margin - 1.55 * line_height
+%>
+%if notes is not None:
+    %for i,line in enumerate(notes):
+        ${notes_x} ${ notes_y - i * line_height } moveto (${line}) show
+    %endfor
+%endif
+
+
+
+'''
+
+NOTES_PAGE = '''
+0.1 setlinewidth
+newpath ${page_margin} ${page_margin} ${goban_width} ${page_height - 2 * page_margin} rectstroke
+
+<%
+    line_height = font_size * 1.2
+    notes_x = page_margin + line_height
+    notes_y = page_height - page_margin - 1.55 * line_height
+
+%>
+%if notes is not None:
+    %for i,line in enumerate(notes):
+        %if line != '':
+            ${notes_x} ${ notes_y - i * line_height } moveto (${line}) show
+        %endif
+    %endfor
+%endif
+
+'''
+
+
+DOCUMENT = '''
+%%!PS-Adobe-2.0
+%%% Goban
+%%%DocumentMedia: Default ${page_width} ${page_height} 0 () ()
+%%%Orientation: Portrait
+%%Title: PutTitleHere
+%%%Pages: ${len(pages)}
+
+[/Creator (pykifu 1.0)
+/Author(${metadata.get('AN', 'pykifu')})
+/Title (${metadata.get('PW', '')} vs ${metadata.get('PB', '')} ${metadata.get('DT', '')} ${metadata.get('EV', '')})
+/Subject (Go, Baduk, Weiqui, Kifu)
+/Keywords (go, goban, weiqui)
+/DOCINFO pdfmark
+
+
+/${font_family} findfont
+${font_size} scalefont
+setfont
+%%%Pages: ${len(pages)}
+%for i, page in enumerate(pages):
+%%Page: ${i+1} ${len(pages)}
+${page}
+showpage
+%endfor
+'''
+
+STONE = '''
+    <%
+        goban_x = page_margin
+        goban_y = page_height - goban_width - page_margin
+        line_space = goban_width / 18.00
+        hoshi_size = line_space / 12.00
+
+        stone_x = goban_x + line_space * x
+        stone_y = goban_y + line_space * y
+        stone_size = line_space / 2.2
+    %>
+
+    %if stone_color is not None:
+        newpath ${stone_x} ${stone_y} ${stone_size} 0 360 arc
+        
+        gsave
+            0.00 setgray
+            %if stone_color == 'w':
+                1 setgray
+            %endif
+            fill
+        stroke
+        0.00 setgray 
+        newpath ${stone_x} ${stone_y} ${stone_size} 0 360 arc
+        stroke
+    %endif
+
+
+    0 setgray
+    %if stone_color is not None and stone_color == 'b':
+        1 setgray
+    %endif
+
+    %if stone_label is not None:
+        newpath
+        ${stone_x} ${stone_y} moveto
+        (${stone_label}) dup true charpath pathbbox 3 -1 roll sub 2 div neg 3 1 roll sub 2 div 1 sub exch ${stone_x} ${stone_y} moveto rmoveto show
+    %endif
+
+    %if stone_symbol is not None:
+        /ZapfDingbats findfont
+        ${font_size} scalefont
+        setfont
+        0 setgray
+        %if stone_color is not None and stone_color == 'b':
+            1 setgray
+        %endif
+
+
+        newpath ${stone_x} ${stone_y} moveto
+        (${stone_symbol}) dup true charpath pathbbox 3 -1 roll sub 2 div neg 3 1 roll sub 2 div 1 sub exch ${stone_x} ${stone_y} moveto rmoveto show
+        %%RESET FONT
+        /${font_family} findfont
+        ${font_size} scalefont
+        setfont
+    %endif
+
+'''
+
+
+## END --------------- TEMPLATES
+
+main()

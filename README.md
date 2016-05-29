@@ -10,7 +10,9 @@ Raw postscript is generated (Basically lines, stones and texts at appropriate co
 # Usage
 `./pykifu <input-sgf-file.sgf> | ps2pdf - <output-pdf-file.pdf>`
 
-The sample directory contains all sgf and converted pdf from www.gogameguru.com untill 05-28-2016
+# Samples
+- Sample pdf [Lee Sedol vs AlphaGo https://github.com/aniljava/pykifu/releases/download/1.0/sample-lee-sedol-vs-alphago-game-1.pdf]
+- https://github.com/aniljava/pykifu/releases has all other pdfs and sgfs from www.gogameguru.com untill 05-28-2016
 
 # FEATURES
 - Currently Splits moves based on the comments.
